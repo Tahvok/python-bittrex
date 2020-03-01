@@ -49,11 +49,11 @@ CONDITIONTYPE_LESS_THAN = 'LESS_THAN'
 CONDITIONTYPE_STOP_LOSS_FIXED = 'STOP_LOSS_FIXED'
 CONDITIONTYPE_STOP_LOSS_PERCENTAGE = 'STOP_LOSS_PERCENTAGE'
 
-API_V1_1 = 'v1.1'
-API_V2_0 = 'v2.0'
+API_URI = 'https://api.bittrex.com'
 
-BASE_URL_V1_1 = 'https://bittrex.com/api/v1.1{path}?'
-BASE_URL_V2_0 = 'https://bittrex.com/api/v2.0{path}?'
+API_V3_0 = 'v3'
+
+BASE_PATH = '/v3{path}'
 
 PROTECTION_PUB = 'pub'  # public methods
 PROTECTION_PRV = 'prv'  # authenticated methods
@@ -71,26 +71,38 @@ def encrypt(api_key, api_secret, export=True, export_fn='secrets.json'):
     return api
 
 
-def using_requests(request_url, apisign):
-    return requests.get(
-        request_url,
-        headers={"apisign": apisign},
-        timeout=10
-    ).json()
-
-
 class Bittrex(object):
     """
     Used for requesting Bittrex with API key and API secret
     """
 
-    def __init__(self, api_key, api_secret, calls_per_second=1, dispatch=using_requests, api_version=API_V1_1):
+    def __init__(self, api_key, api_secret, calls_per_second=1):
         self.api_key = str(api_key) if api_key is not None else ''
         self.api_secret = str(api_secret) if api_secret is not None else ''
-        self.dispatch = dispatch
         self.call_rate = 1.0 / calls_per_second
         self.last_call = None
-        self.api_version = api_version
+
+        uri = API_URI
+
+        self.base_url = '{uri}{path}'.format(uri=uri, path=BASE_PATH)
+
+    def dispatch(self, request_url, api_timestamp, body):
+        request_body = body if body else ''
+        signature = hashlib.sha512(request_body.encode()).hexdigest()
+        pre_sign = api_timestamp + request_url + 'GET' + signature
+        api_sign = hmac.new(self.api_secret.encode(), pre_sign.encode(), hashlib.sha512).hexdigest()
+        response = requests.get(
+            request_url,
+            headers={
+                'Api-Key': self.api_key.encode(),
+                'Api-Timestamp': api_timestamp,
+                'Api-Content-Hash': signature,
+                'Api-Signature': api_sign
+            },
+            timeout=10
+        )
+
+        return response.json()
 
     def decrypt(self):
         if encrypted:
@@ -120,7 +132,7 @@ class Bittrex(object):
 
             self.last_call = time.time()
 
-    def _api_query(self, protection=None, path_dict=None, options=None):
+    def _api_query(self, protection=None, path_dict=None, options=None, body=None):
         """
         Queries Bittrex
 
@@ -133,41 +145,24 @@ class Bittrex(object):
         if not options:
             options = {}
 
-        if self.api_version not in path_dict:
-            raise Exception('method call not available under API version {}'.format(self.api_version))
-
-        request_url = BASE_URL_V2_0 if self.api_version == API_V2_0 else BASE_URL_V1_1
-        request_url = request_url.format(path=path_dict[self.api_version])
+        request_url = self.base_url
+        request_url = request_url.format(path=path_dict)
 
         nonce = str(int(time.time() * 1000))
-
-        if protection != PROTECTION_PUB:
-            request_url = "{0}apikey={1}&nonce={2}&".format(request_url, self.api_key, nonce)
 
         request_url += urlencode(options)
 
         try:
-            if sys.version_info >= (3, 0) and protection != PROTECTION_PUB:
-
-                apisign = hmac.new(bytearray(self.api_secret, 'ascii'),
-                                   bytearray(request_url, 'ascii'),
-                                   hashlib.sha512).hexdigest()
-
-            else:
-
-                apisign = hmac.new(self.api_secret.encode(),
-                                   request_url.encode(),
-                                   hashlib.sha512).hexdigest()
-
             self.wait()
 
-            return self.dispatch(request_url, apisign)
+            return self.dispatch(request_url, nonce, body)
 
-        except Exception:
+        except Exception as e:
             return {
                 'success': False,
                 'message': 'NO_API_RESPONSE',
-                'result': None
+                'result': None,
+                'error': str(e)
             }
 
     def get_markets(self):
@@ -199,9 +194,7 @@ class Bittrex(object):
         :return: Available market info in JSON
         :rtype : dict
         """
-        return self._api_query(path_dict={
-            API_V1_1: '/public/getmarkets',
-        }, protection=PROTECTION_PUB)
+        return self._api_query(path_dict='/markets')
 
     def get_currencies(self):
         """
@@ -215,27 +208,7 @@ class Bittrex(object):
         :return: Supported currencies info in JSON
         :rtype : dict
         """
-        return self._api_query(path_dict={
-            API_V1_1: '/public/getcurrencies',
-            API_V2_0: '/pub/Currencies/GetCurrencies'
-        }, protection=PROTECTION_PUB)
-
-    def get_ticker(self, market):
-        """
-        Used to get the current tick values for a market.
-
-        Endpoints:
-        1.1 /public/getticker
-        2.0 NO EQUIVALENT -- but get_latest_candle gives comparable data
-
-        :param market: String literal for the market (ex: BTC-LTC)
-        :type market: str
-        :return: Current values for given market in JSON
-        :rtype : dict
-        """
-        return self._api_query(path_dict={
-            API_V1_1: '/public/getticker',
-        }, options={'market': market}, protection=PROTECTION_PUB)
+        return self._api_query(path_dict='/currencies')
 
     def get_market_summaries(self):
         """
@@ -248,10 +221,7 @@ class Bittrex(object):
         :return: Summaries of active exchanges in JSON
         :rtype : dict
         """
-        return self._api_query(path_dict={
-            API_V1_1: '/public/getmarketsummaries',
-            API_V2_0: '/pub/Markets/GetMarketSummaries'
-        }, protection=PROTECTION_PUB)
+        return self._api_query(path_dict='/markets/summaries')
 
     def get_market_summary(self, market):
         """
@@ -267,66 +237,25 @@ class Bittrex(object):
         :return: Summaries of active exchanges of a coin in JSON
         :rtype : dict
         """
-        return self._api_query(path_dict={
-            API_V1_1: '/public/getmarketsummary',
-            API_V2_0: '/pub/Market/GetMarketSummary'
-        }, options={'market': market, 'marketname': market}, protection=PROTECTION_PUB)
+        return self._api_query(
+            path_dict='/markets/{marketSymbol}/summary'.format(marketSymbol=market))
 
-    def get_orderbook(self, market, depth_type=BOTH_ORDERBOOK):
+    def get_market_ticker(self, market):
         """
-        Used to get retrieve the orderbook for a given market.
-
-        The depth_type parameter is IGNORED under v2.0 and both orderbooks are always returned
+        Used to get the last 24 hour summary of all active
+        exchanges in specific coin
 
         Endpoint:
-        1.1 /public/getorderbook
-        2.0 /pub/Market/GetMarketOrderBook
+        1.1 /public/getmarketsummary
+        2.0 /pub/Market/GetMarketSummary
 
-        :param market: String literal for the market (ex: BTC-LTC)
+        :param market: String literal for the market(ex: BTC-XRP)
         :type market: str
-        :param depth_type: buy, sell or both to identify the type of
-            orderbook to return.
-            Use constants BUY_ORDERBOOK, SELL_ORDERBOOK, BOTH_ORDERBOOK
-        :type depth_type: str
-        :return: Orderbook of market in JSON
+        :return: Summaries of active exchanges of a coin in JSON
         :rtype : dict
         """
-        return self._api_query(path_dict={
-            API_V1_1: '/public/getorderbook',
-            API_V2_0: '/pub/Market/GetMarketOrderBook'
-        }, options={'market': market, 'marketname': market, 'type': depth_type}, protection=PROTECTION_PUB)
-
-    def get_market_history(self, market):
-        """
-        Used to retrieve the latest trades that have occurred for a
-        specific market.
-
-        Endpoint:
-        1.1 /market/getmarkethistory
-        2.0 NO Equivalent
-
-        Example ::
-            {'success': True,
-            'message': '',
-            'result': [ {'Id': 5625015,
-                         'TimeStamp': '2017-08-31T01:29:50.427',
-                         'Quantity': 7.31008193,
-                         'Price': 0.00177639,
-                         'Total': 0.01298555,
-                         'FillType': 'FILL',
-                         'OrderType': 'BUY'},
-                         ...
-                       ]
-            }
-
-        :param market: String literal for the market (ex: BTC-LTC)
-        :type market: str
-        :return: Market history in JSON
-        :rtype : dict
-        """
-        return self._api_query(path_dict={
-            API_V1_1: '/public/getmarkethistory',
-        }, options={'market': market, 'marketname': market}, protection=PROTECTION_PUB)
+        return self._api_query(
+            path_dict='/markets/{marketSymbol}/ticker'.format(marketSymbol=market))
 
     def buy_limit(self, market, quantity, rate):
         """
